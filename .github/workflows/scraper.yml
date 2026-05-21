@@ -1,14 +1,12 @@
 name: Service Updates Scraper
-
 on:
   schedule:
-    - cron: '0 8 * * 1'
+    - cron: '0 8 * * 1'  # 10:00 Kyiv winter / змін на '0 8 * * 1' для літа
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -16,6 +14,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Restore seen hashes cache
+        uses: actions/cache@v4
+        with:
+          path: seen_hashes.json
+          key: seen-hashes-${{ runner.os }}
 
       - name: Install dependencies
         run: |
