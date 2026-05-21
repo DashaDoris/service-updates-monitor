@@ -1,8 +1,10 @@
 import asyncio
-from playwright.async_api import async_playwright
+import hashlib
+import httpx
 import json
 import os
 from datetime import datetime
+from playwright.async_api import async_playwright
 
 # ---------------------------
 # SMART WAIT STRATEGY
@@ -54,6 +56,28 @@ PAGES = [
     {"service": "Google Play", "url": "https://play.google.com/console/about/whats-new/"},
 ]
 
+# ---------------------------
+# DEDUPLICATION
+# ---------------------------
+
+HASHES_FILE = "seen_hashes.json"
+
+
+def load_seen_hashes() -> dict:
+    if os.path.exists(HASHES_FILE):
+        with open(HASHES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_seen_hashes(hashes: dict):
+    with open(HASHES_FILE, "w", encoding="utf-8") as f:
+        json.dump(hashes, f, ensure_ascii=False, indent=2)
+
+
+def content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
 
 # ---------------------------
 # SCRAPER
@@ -65,7 +89,7 @@ async def scrape_page(page, service_info):
     try:
         await page.goto(
             service_info["url"],
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=30000
         )
 
@@ -73,7 +97,7 @@ async def scrape_page(page, service_info):
 
         try:
             await page.wait_for_selector(wait_for, timeout=8000)
-        except:
+        except Exception:
             pass
 
         await page.wait_for_timeout(1500)
@@ -96,10 +120,12 @@ async def scrape_page(page, service_info):
 
             const text = (el || document.body).innerText || "";
 
-            return text.slice(0, 8000);
+            // trim at last paragraph boundary within 8000 chars
+            const raw = text.slice(0, 8000);
+            const lastBreak = Math.max(raw.lastIndexOf("\\n\\n"), raw.lastIndexOf(". "));
+            return lastBreak > 4000 ? raw.slice(0, lastBreak + 1) : raw;
         }""")
 
-        # cleanup noise
         content = " ".join(content.split())
 
         if not content or len(content) < 100:
@@ -131,6 +157,8 @@ async def scrape_page(page, service_info):
 
 async def main():
     results = []
+    seen_hashes = load_seen_hashes()
+    new_results = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -146,36 +174,56 @@ async def main():
             )
         )
 
-        for service in PAGES:
-            page = await context.new_page()
-            result = await scrape_page(page, service)
-            results.append(result)
-            await page.close()
-            await asyncio.sleep(1)
+        semaphore = asyncio.Semaphore(3)
+
+        async def scrape_with_limit(service):
+            async with semaphore:
+                page = await context.new_page()
+                result = await scrape_page(page, service)
+                await page.close()
+                await asyncio.sleep(1)
+                return result
+
+        results = await asyncio.gather(*[scrape_with_limit(s) for s in PAGES])
 
         await browser.close()
 
-    with open("results.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    # deduplicate: keep only results whose content changed since last run
+    for result in results:
+        if result["status"] != "ok":
+            continue
+        h = content_hash(result["content"])
+        service_key = result["service"]
+        if seen_hashes.get(service_key) != h:
+            seen_hashes[service_key] = h
+            new_results.append(result)
+            print(f"🆕 New content: {result['service']}")
+        else:
+            print(f"⏭️  No changes: {result['service']}")
 
-    print(f"✅ Done: {len(results)} services scraped")
+    save_seen_hashes(seen_hashes)
+
+    with open("results.json", "w", encoding="utf-8") as f:
+        json.dump(new_results, f, ensure_ascii=False, indent=2)
+
+    print(f"✅ Done: {len(new_results)} services with new content (out of {len(results)} scraped)")
 
     webhook_url = os.environ.get("N8N_WEBHOOK_URL")
 
-    if webhook_url:
-        import urllib.request
-
-        data = json.dumps(results).encode("utf-8")
-
-        req = urllib.request.Request(
-            webhook_url,
-            data=data,
-            headers={"Content-Type": "application/json"}
-        )
-
-        urllib.request.urlopen(req)
-
-        print("📤 Sent to n8n")
+    if webhook_url and new_results:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    webhook_url,
+                    json=new_results,
+                    headers={"Content-Type": "application/json"}
+                )
+                response.raise_for_status()
+            print("📤 Sent to n8n")
+        except httpx.HTTPError as e:
+            print(f"❌ Webhook failed: {e}")
+    elif not new_results:
+        print("📭 Nothing new to send")
 
 
 asyncio.run(main())
