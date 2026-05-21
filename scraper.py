@@ -12,9 +12,9 @@ PAGES = [
         "wait_for": ".release-item, article, .changelog-entry"
     },
     {
-        "service": "RevenueCat", 
-        "url": "https://www.revenuecat.com/changelog",
-        "wait_for": "article, .changelog-item, main"
+        "service": "RevenueCat",
+        "url": "https://www.revenuecat.com/blog/",
+        "wait_for": "article, main, .post, .content"
     },
     {
         "service": "Sentry",
@@ -23,13 +23,13 @@ PAGES = [
     },
     {
         "service": "Customer.io",
-        "url": "https://docs.customer.io/release-notes/",
-        "wait_for": "article, main, .content"
+        "url": "https://customer.io/blog/",
+        "wait_for": "article, main"
     },
     {
         "service": "Algolia",
-        "url": "https://www.algolia.com/changelog/",
-        "wait_for": "article, .changelog, main"
+        "url": "https://changelog.algolia.com/",
+        "wait_for": "article, main"
     },
     {
         "service": "AppsFlyer",
@@ -38,23 +38,28 @@ PAGES = [
     },
     {
         "service": "Firebase Android",
-        "url": "https://firebase.google.com/support/release-notes/android",
-        "wait_for": "article, main, .devsite-article"
+        "url": "https://firebase.google.com/docs/android/setup",
+        "wait_for": "main, article"
     },
     {
         "service": "Firebase iOS",
-        "url": "https://firebase.google.com/support/release-notes/ios",
-        "wait_for": "article, main, .devsite-article"
+        "url": "https://firebase.google.com/docs/ios/setup",
+        "wait_for": "main, article"
     },
     {
         "service": "Apple Developer",
-        "url": "https://developer.apple.com/news/releases/",
-        "wait_for": "main, article, .column"
+        "url": "https://developer.apple.com/documentation/ios",
+        "wait_for": "main"
     },
     {
-        "service": "Android Developer",
-        "url": "https://developer.android.com/blog/posts/i-o-2026-what-s-new-in-google-play",
-        "wait_for": "article, main, .devsite-article"
+        "service": "Apple Developer News",
+        "url": "https://developer.apple.com/news/",
+        "wait_for": "main, article"
+    },
+    {
+       "service": "Google Play Console Features",
+       "url": "https://play.google.com/console/about/whats-new/",
+       "wait_for": "main"
     },
 ]
 
