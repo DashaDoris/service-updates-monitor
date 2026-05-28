@@ -53,7 +53,6 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
     for attempt in range(retries + 1):
         try:
-            # SPA сайти потребують networkidle, решта — domcontentloaded
             spa_services = {"RevenueCat", "Algolia", "Amplitude"}
             wait_until = "networkidle" if service_info["service"] in spa_services else "domcontentloaded"
 
@@ -63,11 +62,9 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
                 timeout=30000
             )
 
-            # Додаткове очікування для SPA
             if service_info["service"] in spa_services:
                 await page.wait_for_timeout(2000)
 
-            # Чекаємо появи основного контенту
             for selector in ["main", "article", "[role='main']", "body"]:
                 try:
                     await page.wait_for_selector(selector, timeout=5000)
@@ -75,7 +72,6 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
                 except Exception:
                     continue
 
-            # Витягуємо текст зі збереженням структури
             content = await page.evaluate("""() => {
                 const selectors = [
                     'main',
@@ -95,33 +91,134 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
                 const target = el || document.body;
 
-                // Зберігаємо структуру: заголовки і параграфи через \n
                 const blocks = target.querySelectorAll('h1,h2,h3,h4,p,li,time,[class*="date"],[class*="release"]');
                 if (blocks.length > 0) {
                     return Array.from(blocks)
                         .map(b => b.innerText?.trim())
                         .filter(t => t && t.length > 2)
-                        .join('\n')
-                        .slice(0, 12000); // більше символів зі структурою
+                        .join('\\n')
+                        .slice(0, 12000);
                 }
 
-                // Fallback: звичайний текст
                 return (target.innerText || '').slice(0, 12000);
             }""")
 
             content = content.strip()
 
             if not content or len(content) < 100:
+                if attempt < retries:
+                    print(f"  ⚠️ Empty content, retry {attempt + 1}...")
+                    await page.wait_for_timeout(3000)
+                    continue
+                return _error_result(service_info, "empty content after retries")
+
+            return {
+                "service": service_info["service"],
+                "url": service_info["url"],
+                "content": content,
+                "scraped_at": datetime.now().isoformat(),
+                "status": "ok"
+            }
+
+        except Exception as e:
             if attempt < retries:
-                print(f"  ⚠️ Empty content, retry {attempt + 1}...")
+                print(f"  ⚠️ Error on attempt {attempt + 1}: {e}, retrying...")
                 await page.wait_for_timeout(3000)
                 continue
-            return _error_result(service_info, "empty content after retries")
+            return _error_result(service_info, str(e))
 
-        return {
-            "service": service_info["service"],
-            "url": service_info["url"],
-            "content": content,
-            "scraped_at": datetime.now().isoformat(),
-            "status": "ok"
-        }
+    return _error_result(service_info, "max retries exceeded")
+
+
+def _error_result(service_info: dict, reason: str) -> dict:
+    return {
+        "service": service_info["service"],
+        "url": service_info["url"],
+        "content": "",
+        "scraped_at": datetime.now().isoformat(),
+        "status": f"error: {reason}"
+    }
+
+
+# ---------------------------
+# MAIN
+# ---------------------------
+
+async def main():
+    seen_hashes = load_seen_hashes()
+    new_results = []
+
+    cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%B %d, %Y")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9"
+            }
+        )
+
+        semaphore = asyncio.Semaphore(2)
+
+        async def scrape_with_limit(service):
+            async with semaphore:
+                page = await context.new_page()
+                result = await scrape_page(page, service)
+                await page.close()
+                await asyncio.sleep(2)
+                return result
+
+        results = await asyncio.gather(*[scrape_with_limit(s) for s in PAGES])
+        await browser.close()
+
+    for result in results:
+        if result["status"] != "ok":
+            print(f"⚠️  Skipped {result['service']}: {result['status']}")
+            continue
+
+        h = content_hash(result["content"])
+        service_key = result["service"]
+
+        if seen_hashes.get(service_key) != h:
+            seen_hashes[service_key] = h
+            result["since_date"] = cutoff_date
+            new_results.append(result)
+            print(f"🆕 New content: {result['service']}")
+        else:
+            print(f"⏭️  No changes: {result['service']}")
+
+    save_seen_hashes(seen_hashes)
+
+    with open("results.json", "w", encoding="utf-8") as f:
+        json.dump(new_results, f, ensure_ascii=False, indent=2)
+
+    print(f"\n✅ Done: {len(new_results)} services with new content (out of {len(results)} scraped)")
+
+    webhook_url = os.environ.get("N8N_WEBHOOK_URL")
+
+    if webhook_url and new_results:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    webhook_url,
+                    json=new_results,
+                    headers={"Content-Type": "application/json"}
+                )
+                response.raise_for_status()
+            print("📤 Sent to n8n")
+        except httpx.HTTPError as e:
+            print(f"❌ Webhook failed: {e}")
+    elif not new_results:
+        print("📭 Nothing new to send")
+
+
+asyncio.run(main())
