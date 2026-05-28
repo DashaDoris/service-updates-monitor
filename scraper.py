@@ -146,7 +146,7 @@ async def main():
     seen_hashes = load_seen_hashes()
     new_results = []
 
-    cutoff_date = (datetime.now() - timedelta(days=30)).strftime("%B %d, %Y")
+    cutoff_date = (datetime.now() - timedelta(days=40)).strftime("%B %d, %Y")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
