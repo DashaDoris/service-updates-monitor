@@ -19,7 +19,7 @@ PAGES = [
 ]
 
 CODA_DOC_ID = "TZR3xqmlHs"
-CODA_TABLE_ID = "9WXyTd"
+CODA_TABLE_ID = "grid-zCs69WXyTd"
 
 # ---------------------------
 # DEDUPLICATION
