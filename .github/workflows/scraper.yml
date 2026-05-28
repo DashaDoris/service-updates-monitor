@@ -19,7 +19,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: seen_hashes.json
-          key: seen-hashes-${{ runner.os }}
+          key: seen-hashes-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            seen-hashes-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
