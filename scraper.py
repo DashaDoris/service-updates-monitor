@@ -50,17 +50,18 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
     for attempt in range(retries + 1):
         try:
-            spa_services = set()  # всі сервіси завантажуються через domcontentloaded
+            spa_services = {"RevenueCat"}
             wait_until = "networkidle" if service_info["service"] in spa_services else "domcontentloaded"
+            timeout = 60000 if service_info["service"] in spa_services else 30000
 
             await page.goto(
                 service_info["url"],
                 wait_until=wait_until,
-                timeout=30000
+                timeout=timeout
             )
 
             if service_info["service"] in spa_services:
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(5000)
 
             for selector in ["main", "article", "[role='main']", "body"]:
                 try:
