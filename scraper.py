@@ -112,3 +112,16 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
             content = content.strip()
 
             if not content or len(content) < 100:
+            if attempt < retries:
+                print(f"  ⚠️ Empty content, retry {attempt + 1}...")
+                await page.wait_for_timeout(3000)
+                continue
+            return _error_result(service_info, "empty content after retries")
+
+        return {
+            "service": service_info["service"],
+            "url": service_info["url"],
+            "content": content,
+            "scraped_at": datetime.now().isoformat(),
+            "status": "ok"
+        }
