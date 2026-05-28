@@ -15,6 +15,7 @@ PAGES = [
     {"service": "Sentry",          "url": "https://sentry.io/changelog/"},
     {"service": "Firebase",        "url": "https://firebase.google.com/support/releases"},
     {"service": "Apple Developer", "url": "https://developer.apple.com/news/"},
+    {"service": "BytePlus VOD",    "url": "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes"},
 ]
 
 # ---------------------------
@@ -53,7 +54,6 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
             timeout=30000
         )
 
-        # Чекаємо поки з'являться посилання на релізи
         try:
             await page.wait_for_selector("a[href*='/release/']", timeout=15000)
             print("  ✅ Release links found")
@@ -62,7 +62,6 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
 
         await page.wait_for_timeout(3000)
 
-        # Витягуємо всі посилання на релізи
         release_links = await page.evaluate("""() => {
             return Array.from(document.querySelectorAll('a[href*="/release/"]'))
                 .map(a => a.href)
@@ -71,7 +70,6 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
 
         print(f"  📋 Total release links found: {len(release_links)}")
 
-        # Фільтруємо за датою в URL
         new_urls = []
         for url in release_links:
             match = re.search(r'(\d{4}-\d{2}-\d{2})$', url)
@@ -94,7 +92,6 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
                 "status": "no_new_releases"
             }
 
-        # Скрапимо кожен реліз окремо
         all_content = []
         for url in new_urls[:10]:
             try:
@@ -140,11 +137,24 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
     for attempt in range(retries + 1):
         try:
-            await page.goto(
-                service_info["url"],
-                wait_until="domcontentloaded",
-                timeout=30000
-            )
+            # BytePlus потребує довшого очікування (JS-рендерований docs сайт)
+            if service_info["service"] == "BytePlus VOD":
+                await page.goto(
+                    service_info["url"],
+                    wait_until="domcontentloaded",
+                    timeout=30000
+                )
+                try:
+                    await page.wait_for_selector("article, .content, main, [class*='release'], [class*='changelog']", timeout=15000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(5000)
+            else:
+                await page.goto(
+                    service_info["url"],
+                    wait_until="domcontentloaded",
+                    timeout=30000
+                )
 
             for selector in ["main", "article", "[role='main']", "body"]:
                 try:
