@@ -51,7 +51,7 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
     for attempt in range(retries + 1):
         try:
-            spa_services = {"RevenueCat", "Algolia", "Amplitude"}
+            spa_services = set()  # всі сервіси завантажуються через domcontentloaded
             wait_until = "networkidle" if service_info["service"] in spa_services else "domcontentloaded"
 
             await page.goto(
