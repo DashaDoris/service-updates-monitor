@@ -3,40 +3,8 @@ import hashlib
 import httpx
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-
-# ---------------------------
-# SMART WAIT STRATEGY
-# ---------------------------
-
-def detect_page_type(url: str) -> str:
-    url = url.lower()
-
-    if any(x in url for x in ["blog", "news"]):
-        return "blog"
-
-    if any(x in url for x in ["changelog", "release", "whats-new", "announcements"]):
-        return "changelog"
-
-    if any(x in url for x in ["docs", "developer.apple.com/documentation"]):
-        return "docs"
-
-    return "unknown"
-
-
-WAIT_MAP = {
-    "blog": "article",
-    "changelog": "article, main",
-    "docs": "main",
-    "unknown": "main"
-}
-
-
-def get_wait_for(url: str):
-    page_type = detect_page_type(url)
-    return WAIT_MAP.get(page_type, "main")
-
 
 # ---------------------------
 # PAGES
@@ -80,147 +48,67 @@ def content_hash(content: str) -> str:
 # SCRAPER
 # ---------------------------
 
-async def scrape_page(page, service_info):
+async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
     print(f"🔍 {service_info['service']}")
 
-    try:
-        await page.goto(
-            service_info["url"],
-            wait_until="domcontentloaded",
-            timeout=30000
-        )
-
-        wait_for = get_wait_for(service_info["url"])
-
+    for attempt in range(retries + 1):
         try:
-            await page.wait_for_selector(wait_for, timeout=8000)
-        except Exception:
-            pass
+            # SPA сайти потребують networkidle, решта — domcontentloaded
+            spa_services = {"RevenueCat", "Algolia", "Amplitude"}
+            wait_until = "networkidle" if service_info["service"] in spa_services else "domcontentloaded"
 
-        await page.wait_for_timeout(1500)
-
-        content = await page.evaluate("""() => {
-            const selectors = [
-                'main',
-                'article',
-                '[role="main"]',
-                '.content',
-                '.devsite-article-body'
-            ];
-
-            let el = null;
-
-            for (const s of selectors) {
-                el = document.querySelector(s);
-                if (el) break;
-            }
-
-            const text = (el || document.body).innerText || "";
-
-            // trim at last paragraph boundary within 8000 chars
-            const raw = text.slice(0, 8000);
-            const lastBreak = Math.max(raw.lastIndexOf("\\n\\n"), raw.lastIndexOf(". "));
-            return lastBreak > 4000 ? raw.slice(0, lastBreak + 1) : raw;
-        }""")
-
-        content = " ".join(content.split())
-
-        if not content or len(content) < 100:
-            status = "empty"
-        else:
-            status = "ok"
-
-        return {
-            "service": service_info["service"],
-            "url": service_info["url"],
-            "content": content,
-            "scraped_at": datetime.now().isoformat(),
-            "status": status
-        }
-
-    except Exception as e:
-        return {
-            "service": service_info["service"],
-            "url": service_info["url"],
-            "content": "",
-            "scraped_at": datetime.now().isoformat(),
-            "status": f"error: {str(e)}"
-        }
-
-
-# ---------------------------
-# MAIN
-# ---------------------------
-
-async def main():
-    results = []
-    seen_hashes = load_seen_hashes()
-    new_results = []
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
-        )
-
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+            await page.goto(
+                service_info["url"],
+                wait_until=wait_until,
+                timeout=30000
             )
-        )
 
-        semaphore = asyncio.Semaphore(3)
+            # Додаткове очікування для SPA
+            if service_info["service"] in spa_services:
+                await page.wait_for_timeout(2000)
 
-        async def scrape_with_limit(service):
-            async with semaphore:
-                page = await context.new_page()
-                result = await scrape_page(page, service)
-                await page.close()
-                await asyncio.sleep(1)
-                return result
+            # Чекаємо появи основного контенту
+            for selector in ["main", "article", "[role='main']", "body"]:
+                try:
+                    await page.wait_for_selector(selector, timeout=5000)
+                    break
+                except Exception:
+                    continue
 
-        results = await asyncio.gather(*[scrape_with_limit(s) for s in PAGES])
+            # Витягуємо текст зі збереженням структури
+            content = await page.evaluate("""() => {
+                const selectors = [
+                    'main',
+                    'article',
+                    '[role="main"]',
+                    '.content',
+                    '.devsite-article-body',
+                    '.changelog',
+                    '.release-notes'
+                ];
 
-        await browser.close()
+                let el = null;
+                for (const s of selectors) {
+                    el = document.querySelector(s);
+                    if (el) break;
+                }
 
-    # deduplicate: keep only results whose content changed since last run
-    for result in results:
-        if result["status"] != "ok":
-            continue
-        h = content_hash(result["content"])
-        service_key = result["service"]
-        if seen_hashes.get(service_key) != h:
-            seen_hashes[service_key] = h
-            new_results.append(result)
-            print(f"🆕 New content: {result['service']}")
-        else:
-            print(f"⏭️  No changes: {result['service']}")
+                const target = el || document.body;
 
-    save_seen_hashes(seen_hashes)
+                // Зберігаємо структуру: заголовки і параграфи через \n
+                const blocks = target.querySelectorAll('h1,h2,h3,h4,p,li,time,[class*="date"],[class*="release"]');
+                if (blocks.length > 0) {
+                    return Array.from(blocks)
+                        .map(b => b.innerText?.trim())
+                        .filter(t => t && t.length > 2)
+                        .join('\n')
+                        .slice(0, 12000); // більше символів зі структурою
+                }
 
-    with open("results.json", "w", encoding="utf-8") as f:
-        json.dump(new_results, f, ensure_ascii=False, indent=2)
+                // Fallback: звичайний текст
+                return (target.innerText || '').slice(0, 12000);
+            }""")
 
-    print(f"✅ Done: {len(new_results)} services with new content (out of {len(results)} scraped)")
+            content = content.strip()
 
-    webhook_url = os.environ.get("N8N_WEBHOOK_URL")
-
-    if webhook_url and new_results:
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.post(
-                    webhook_url,
-                    json=new_results,
-                    headers={"Content-Type": "application/json"}
-                )
-                response.raise_for_status()
-            print("📤 Sent to n8n")
-        except httpx.HTTPError as e:
-            print(f"❌ Webhook failed: {e}")
-    elif not new_results:
-        print("📭 Nothing new to send")
-
-
-asyncio.run(main())
+            if not content or len(content) < 100:
