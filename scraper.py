@@ -11,11 +11,10 @@ from playwright.async_api import async_playwright
 # ---------------------------
 
 PAGES = [
-    {"service": "RevenueCat",         "url": "https://www.revenuecat.com/changelog"},
-    {"service": "Sentry",             "url": "https://sentry.io/changelog/"},
-    {"service": "Firebase",           "url": "https://firebase.google.com/support/releases"},
-    {"service": "Apple Developer",    "url": "https://developer.apple.com/news/"},
-    {"service": "Google Play Console","url": "https://play.google.com/console/about/whats-new/"},
+    {"service": "RevenueCat",      "url": "https://community.revenuecat.com/what-s-new-1"},
+    {"service": "Sentry",          "url": "https://sentry.io/changelog/"},
+    {"service": "Firebase",        "url": "https://firebase.google.com/support/releases"},
+    {"service": "Apple Developer", "url": "https://developer.apple.com/news/"},
 ]
 
 # ---------------------------
