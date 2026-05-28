@@ -11,11 +11,9 @@ from playwright.async_api import async_playwright
 # ---------------------------
 
 PAGES = [
-    {"service": "Amplitude",          "url": "https://amplitude.com/releases"},
     {"service": "RevenueCat",         "url": "https://www.revenuecat.com/changelog"},
     {"service": "Sentry",             "url": "https://sentry.io/changelog/"},
     {"service": "Customer.io",        "url": "https://customer.io/docs/release-notes/"},
-    {"service": "Algolia",            "url": "https://changelog.algolia.com/"},
     {"service": "Firebase",           "url": "https://firebase.google.com/support/releases"},
     {"service": "Apple Developer",    "url": "https://developer.apple.com/news/"},
     {"service": "Google Play Console","url": "https://play.google.com/console/about/whats-new/"},
