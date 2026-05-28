@@ -41,47 +41,51 @@ def content_hash(content: str) -> str:
 
 
 # ---------------------------
-# REVENUECAT: знаходимо нові релізи через HTML
+# REVENUECAT: Playwright з очікуванням JS
 # ---------------------------
 
-async def scrape_revenuecat(cutoff_date: datetime) -> dict:
+async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
     print(f"🔍 RevenueCat")
-
     try:
-        # Крок 1: завантажуємо головну changelog сторінку через httpx (без JS)
-        # і шукаємо всі посилання /release/ з датою в URL
-        async with httpx.AsyncClient(
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        ) as client:
-            response = await client.get("https://www.revenuecat.com/changelog")
-            html = response.text
-
-        # Знаходимо всі /release/ URL з датою в кінці (формат: -YYYY-MM-DD)
-        release_urls = re.findall(
-            r'href="(/release/[^"]+?(\d{4}-\d{2}-\d{2}))"',
-            html
+        await page.goto(
+            "https://www.revenuecat.com/changelog",
+            wait_until="domcontentloaded",
+            timeout=30000
         )
 
-        if not release_urls:
-            print(f"  ⚠️ No release URLs found in changelog HTML")
-            return _error_result({"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"}, "no release URLs found")
+        # Чекаємо поки з'являться посилання на релізи
+        try:
+            await page.wait_for_selector("a[href*='/release/']", timeout=15000)
+            print("  ✅ Release links found")
+        except Exception:
+            print("  ⚠️ Timeout waiting for release links")
 
-        # Крок 2: фільтруємо за датою
-        new_releases = []
-        for path, date_str in release_urls:
-            try:
-                release_date = datetime.strptime(date_str, "%Y-%m-%d")
-                if release_date >= cutoff_date:
-                    full_url = f"https://www.revenuecat.com{path}"
-                    if full_url not in [r["url"] for r in new_releases]:
-                        new_releases.append({"url": full_url, "date": date_str})
-            except ValueError:
-                continue
+        await page.wait_for_timeout(3000)
 
-        print(f"  📋 Found {len(new_releases)} new releases after {cutoff_date.strftime('%B %d, %Y')}")
+        # Витягуємо всі посилання на релізи
+        release_links = await page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('a[href*="/release/"]'))
+                .map(a => a.href)
+                .filter((v, i, arr) => arr.indexOf(v) === i);
+        }""")
 
-        if not new_releases:
+        print(f"  📋 Total release links found: {len(release_links)}")
+
+        # Фільтруємо за датою в URL
+        new_urls = []
+        for url in release_links:
+            match = re.search(r'(\d{4}-\d{2}-\d{2})$', url)
+            if match:
+                try:
+                    date = datetime.strptime(match.group(1), "%Y-%m-%d")
+                    if date >= cutoff_date:
+                        new_urls.append(url)
+                except ValueError:
+                    continue
+
+        print(f"  📋 New releases after {cutoff_date.strftime('%B %d, %Y')}: {len(new_urls)}")
+
+        if not new_urls:
             return {
                 "service": "RevenueCat",
                 "url": "https://www.revenuecat.com/changelog",
@@ -90,40 +94,41 @@ async def scrape_revenuecat(cutoff_date: datetime) -> dict:
                 "status": "no_new_releases"
             }
 
-        # Крок 3: скрапимо кожен новий реліз через httpx (статичні сторінки)
+        # Скрапимо кожен реліз окремо
         all_content = []
-        async with httpx.AsyncClient(
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        ) as client:
-            for release in new_releases[:10]:  # максимум 10 релізів
-                try:
-                    r = await client.get(release["url"])
-                    # Витягуємо текст з HTML без тегів
-                    text = re.sub(r'<[^>]+>', ' ', r.text)
-                    text = re.sub(r'\s+', ' ', text).strip()
-                    # Беремо перші 1000 символів кожного релізу
-                    all_content.append(f"[{release['date']}] {release['url']}\n{text[:1000]}")
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    print(f"  ⚠️ Failed to scrape {release['url']}: {e}")
+        for url in new_urls[:10]:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(1000)
+                text = await page.evaluate("""() => {
+                    const main = document.querySelector('main');
+                    return (main || document.body).innerText.slice(0, 1500);
+                }""")
+                all_content.append(f"{url}\n{text.strip()}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"  ⚠️ Failed to scrape {url}: {e}")
 
         if not all_content:
-            return _error_result({"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"}, "failed to scrape releases")
-
-        combined_content = "\n\n---\n\n".join(all_content)
+            return _error_result(
+                {"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"},
+                "failed to scrape individual releases"
+            )
 
         return {
             "service": "RevenueCat",
             "url": "https://www.revenuecat.com/changelog",
-            "content": combined_content,
+            "content": "\n\n---\n\n".join(all_content),
             "scraped_at": datetime.now().isoformat(),
             "status": "ok"
         }
 
     except Exception as e:
         print(f"  ❌ RevenueCat error: {e}")
-        return _error_result({"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"}, str(e))
+        return _error_result(
+            {"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"},
+            str(e)
+        )
 
 
 # ---------------------------
@@ -227,9 +232,6 @@ async def main():
     cutoff_date = datetime.now() - timedelta(days=40)
     cutoff_date_str = cutoff_date.strftime("%B %d, %Y")
 
-    # Скрапимо RevenueCat окремо
-    revenuecat_result = await scrape_revenuecat(cutoff_date)
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -246,6 +248,11 @@ async def main():
                 "Accept-Language": "en-US,en;q=0.9"
             }
         )
+
+        # RevenueCat скрапимо окремо через Playwright
+        revenuecat_page = await context.new_page()
+        revenuecat_result = await scrape_revenuecat(revenuecat_page, cutoff_date)
+        await revenuecat_page.close()
 
         semaphore = asyncio.Semaphore(2)
 
