@@ -18,6 +18,9 @@ PAGES = [
     {"service": "BytePlus VOD",    "url": "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes"},
 ]
 
+CODA_DOC_ID = "TZR3xqmlHs"
+CODA_TABLE_ID = "9WXyTd"
+
 # ---------------------------
 # DEDUPLICATION
 # ---------------------------
@@ -41,8 +44,48 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+async def get_existing_features() -> set:
+    """Читає існуючі feature_name з Coda таблиці"""
+    coda_token = os.environ.get("CODA_API_TOKEN")
+    if not coda_token:
+        print("⚠️ No CODA_API_TOKEN — skipping Coda dedup")
+        return set()
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                f"https://coda.io/apis/v1/docs/{CODA_DOC_ID}/tables/{CODA_TABLE_ID}/rows",
+                headers={"Authorization": f"Bearer {coda_token}"},
+                params={"useColumnNames": "true", "limit": "500"}
+            )
+            response.raise_for_status()
+            rows = response.json().get("items", [])
+            existing = {
+                row["values"].get("Feature name", "").lower().strip()
+                for row in rows
+                if row.get("values", {}).get("Feature name")
+            }
+            print(f"📋 Existing features in Coda: {len(existing)}")
+            return existing
+    except Exception as e:
+        print(f"⚠️ Could not fetch Coda rows: {e}")
+        return set()
+
+
+def is_duplicate(feature_name: str, existing_features: set) -> bool:
+    name = feature_name.lower().strip()
+    for existing in existing_features:
+        if existing == name:
+            return True
+        # Fuzzy: одна назва містить іншу
+        if len(name) > 10 and len(existing) > 10:
+            if existing in name or name in existing:
+                return True
+    return False
+
+
 # ---------------------------
-# REVENUECAT: Playwright з очікуванням JS
+# REVENUECAT
 # ---------------------------
 
 async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
@@ -137,7 +180,6 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
     for attempt in range(retries + 1):
         try:
-            # BytePlus потребує довшого очікування (JS-рендерований docs сайт)
             if service_info["service"] == "BytePlus VOD":
                 await page.goto(
                     service_info["url"],
@@ -145,7 +187,10 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
                     timeout=30000
                 )
                 try:
-                    await page.wait_for_selector("article, .content, main, [class*='release'], [class*='changelog']", timeout=15000)
+                    await page.wait_for_selector(
+                        "article, .content, main, [class*='release'], [class*='changelog']",
+                        timeout=15000
+                    )
                 except Exception:
                     pass
                 await page.wait_for_timeout(5000)
@@ -242,6 +287,9 @@ async def main():
     cutoff_date = datetime.now() - timedelta(days=40)
     cutoff_date_str = cutoff_date.strftime("%B %d, %Y")
 
+    # Читаємо існуючі фічі з Coda для дедуплікації
+    existing_features = await get_existing_features()
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -259,7 +307,6 @@ async def main():
             }
         )
 
-        # RevenueCat скрапимо окремо через Playwright
         revenuecat_page = await context.new_page()
         revenuecat_result = await scrape_revenuecat(revenuecat_page, cutoff_date)
         await revenuecat_page.close()
@@ -290,6 +337,7 @@ async def main():
         if seen_hashes.get(service_key) != h:
             seen_hashes[service_key] = h
             result["since_date"] = cutoff_date_str
+            result["existing_features"] = list(existing_features)
             new_results.append(result)
             print(f"🆕 New content: {result['service']}")
         else:
