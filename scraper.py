@@ -43,17 +43,14 @@ def get_wait_for(url: str):
 # ---------------------------
 
 PAGES = [
-    {"service": "Amplitude", "url": "https://amplitude.com/releases"},
-    {"service": "RevenueCat", "url": "https://www.revenuecat.com/blog/"},
-    {"service": "Sentry", "url": "https://sentry.io/changelog/"},
-    {"service": "Customer.io", "url": "https://customer.io/blog/"},
-    {"service": "Algolia", "url": "https://changelog.algolia.com/"},
-    {"service": "AppsFlyer", "url": "https://support.appsflyer.com/hc/en-us/sections/6551161473041"},
-    {"service": "Firebase Android", "url": "https://firebase.google.com/docs/android/setup"},
-    {"service": "Firebase iOS", "url": "https://firebase.google.com/docs/ios/setup"},
-    {"service": "Apple Developer", "url": "https://developer.apple.com/documentation/ios"},
-    {"service": "Apple News", "url": "https://developer.apple.com/news/"},
-    {"service": "Google Play", "url": "https://play.google.com/console/about/whats-new/"},
+    {"service": "Amplitude",          "url": "https://amplitude.com/releases"},
+    {"service": "RevenueCat",         "url": "https://www.revenuecat.com/changelog"},
+    {"service": "Sentry",             "url": "https://sentry.io/changelog/"},
+    {"service": "Customer.io",        "url": "https://customer.io/docs/release-notes/"},
+    {"service": "Algolia",            "url": "https://changelog.algolia.com/"},
+    {"service": "Firebase",           "url": "https://firebase.google.com/support/releases"},
+    {"service": "Apple Developer",    "url": "https://developer.apple.com/news/"},
+    {"service": "Google Play Console","url": "https://play.google.com/console/about/whats-new/"},
 ]
 
 # ---------------------------
