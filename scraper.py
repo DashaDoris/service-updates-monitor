@@ -3,6 +3,7 @@ import hashlib
 import httpx
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
@@ -11,8 +12,6 @@ from playwright.async_api import async_playwright
 # ---------------------------
 
 PAGES = [
-    {"service": "RevenueCat",      "url": "https://community.revenuecat.com/what-s-new-1"},
-    {"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"},
     {"service": "Sentry",          "url": "https://sentry.io/changelog/"},
     {"service": "Firebase",        "url": "https://firebase.google.com/support/releases"},
     {"service": "Apple Developer", "url": "https://developer.apple.com/news/"},
@@ -42,6 +41,92 @@ def content_hash(content: str) -> str:
 
 
 # ---------------------------
+# REVENUECAT: знаходимо нові релізи через HTML
+# ---------------------------
+
+async def scrape_revenuecat(cutoff_date: datetime) -> dict:
+    print(f"🔍 RevenueCat")
+
+    try:
+        # Крок 1: завантажуємо головну changelog сторінку через httpx (без JS)
+        # і шукаємо всі посилання /release/ з датою в URL
+        async with httpx.AsyncClient(
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        ) as client:
+            response = await client.get("https://www.revenuecat.com/changelog")
+            html = response.text
+
+        # Знаходимо всі /release/ URL з датою в кінці (формат: -YYYY-MM-DD)
+        release_urls = re.findall(
+            r'href="(/release/[^"]+?(\d{4}-\d{2}-\d{2}))"',
+            html
+        )
+
+        if not release_urls:
+            print(f"  ⚠️ No release URLs found in changelog HTML")
+            return _error_result({"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"}, "no release URLs found")
+
+        # Крок 2: фільтруємо за датою
+        new_releases = []
+        for path, date_str in release_urls:
+            try:
+                release_date = datetime.strptime(date_str, "%Y-%m-%d")
+                if release_date >= cutoff_date:
+                    full_url = f"https://www.revenuecat.com{path}"
+                    if full_url not in [r["url"] for r in new_releases]:
+                        new_releases.append({"url": full_url, "date": date_str})
+            except ValueError:
+                continue
+
+        print(f"  📋 Found {len(new_releases)} new releases after {cutoff_date.strftime('%B %d, %Y')}")
+
+        if not new_releases:
+            return {
+                "service": "RevenueCat",
+                "url": "https://www.revenuecat.com/changelog",
+                "content": "",
+                "scraped_at": datetime.now().isoformat(),
+                "status": "no_new_releases"
+            }
+
+        # Крок 3: скрапимо кожен новий реліз через httpx (статичні сторінки)
+        all_content = []
+        async with httpx.AsyncClient(
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        ) as client:
+            for release in new_releases[:10]:  # максимум 10 релізів
+                try:
+                    r = await client.get(release["url"])
+                    # Витягуємо текст з HTML без тегів
+                    text = re.sub(r'<[^>]+>', ' ', r.text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    # Беремо перші 1000 символів кожного релізу
+                    all_content.append(f"[{release['date']}] {release['url']}\n{text[:1000]}")
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    print(f"  ⚠️ Failed to scrape {release['url']}: {e}")
+
+        if not all_content:
+            return _error_result({"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"}, "failed to scrape releases")
+
+        combined_content = "\n\n---\n\n".join(all_content)
+
+        return {
+            "service": "RevenueCat",
+            "url": "https://www.revenuecat.com/changelog",
+            "content": combined_content,
+            "scraped_at": datetime.now().isoformat(),
+            "status": "ok"
+        }
+
+    except Exception as e:
+        print(f"  ❌ RevenueCat error: {e}")
+        return _error_result({"service": "RevenueCat", "url": "https://www.revenuecat.com/changelog"}, str(e))
+
+
+# ---------------------------
 # SCRAPER
 # ---------------------------
 
@@ -50,18 +135,11 @@ async def scrape_page(page, service_info: dict, retries: int = 2) -> dict:
 
     for attempt in range(retries + 1):
         try:
-            spa_services = {"RevenueCat"}
-            wait_until = "networkidle" if service_info["service"] in spa_services else "domcontentloaded"
-            timeout = 60000 if service_info["service"] in spa_services else 30000
-
             await page.goto(
                 service_info["url"],
-                wait_until=wait_until,
-                timeout=timeout
+                wait_until="domcontentloaded",
+                timeout=30000
             )
-
-            if service_info["service"] in spa_services:
-                await page.wait_for_timeout(5000)
 
             for selector in ["main", "article", "[role='main']", "body"]:
                 try:
@@ -146,7 +224,11 @@ async def main():
     seen_hashes = load_seen_hashes()
     new_results = []
 
-    cutoff_date = (datetime.now() - timedelta(days=40)).strftime("%B %d, %Y")
+    cutoff_date = datetime.now() - timedelta(days=40)
+    cutoff_date_str = cutoff_date.strftime("%B %d, %Y")
+
+    # Скрапимо RevenueCat окремо
+    revenuecat_result = await scrape_revenuecat(cutoff_date)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -175,11 +257,13 @@ async def main():
                 await asyncio.sleep(2)
                 return result
 
-        results = await asyncio.gather(*[scrape_with_limit(s) for s in PAGES])
+        playwright_results = await asyncio.gather(*[scrape_with_limit(s) for s in PAGES])
         await browser.close()
 
-    for result in results:
-        if result["status"] != "ok":
+    all_results = [revenuecat_result] + list(playwright_results)
+
+    for result in all_results:
+        if result["status"] not in ("ok",):
             print(f"⚠️  Skipped {result['service']}: {result['status']}")
             continue
 
@@ -188,7 +272,7 @@ async def main():
 
         if seen_hashes.get(service_key) != h:
             seen_hashes[service_key] = h
-            result["since_date"] = cutoff_date
+            result["since_date"] = cutoff_date_str
             new_results.append(result)
             print(f"🆕 New content: {result['service']}")
         else:
@@ -199,7 +283,7 @@ async def main():
     with open("results.json", "w", encoding="utf-8") as f:
         json.dump(new_results, f, ensure_ascii=False, indent=2)
 
-    print(f"\n✅ Done: {len(new_results)} services with new content (out of {len(results)} scraped)")
+    print(f"\n✅ Done: {len(new_results)} services with new content (out of {len(all_results)} scraped)")
 
     webhook_url = os.environ.get("N8N_WEBHOOK_URL")
 
