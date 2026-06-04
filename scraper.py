@@ -12,7 +12,6 @@ from playwright.async_api import async_playwright
 # ---------------------------
 
 PAGES = [
-    {"service": "Sentry",          "url": "https://sentry.io/changelog/"},
     {"service": "Firebase",        "url": "https://firebase.google.com/support/releases"},
     {"service": "BytePlus VOD",    "url": "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes"},
 ]
@@ -273,6 +272,100 @@ async def scrape_apple(page, cutoff_date: datetime, seen_urls=None) -> dict:
 
 
 # ---------------------------
+# SENTRY
+# ---------------------------
+
+async def scrape_sentry(page, cutoff_date: datetime, seen_urls=None) -> dict:
+    seen_urls = seen_urls or set()
+    print(f"\U0001f50d Sentry")
+    try:
+        await page.goto(
+            "https://sentry.io/changelog/",
+            wait_until="domcontentloaded",
+            timeout=30000
+        )
+
+        try:
+            await page.wait_for_selector("a[href*='/changelog/']", timeout=15000)
+            print("  \u2705 Changelog links found")
+        except Exception:
+            print("  \u26a0\ufe0f Timeout waiting for changelog links")
+
+        await page.wait_for_timeout(2000)
+
+        # Кожен запис — лінк виду /changelog/<slug>/ (не сам /changelog/ і не ?page=).
+        # Текст лінка містить заголовок + опис + дату (напр. "...May 27, 2026Read On").
+        articles = await page.evaluate(r"""() => {
+            const out = [];
+            const seen = new Set();
+            const links = document.querySelectorAll("a[href*='/changelog/']");
+            for (const a of links) {
+                let href = a.href.split('#')[0].split('?')[0];
+                // лишаємо тільки конкретні записи: /changelog/<slug>/
+                const m = href.match(/\/changelog\/([^\/]+)\/?$/);
+                if (!m) continue;
+                if (['feed.xml'].includes(m[1])) continue;
+                if (seen.has(href)) continue;
+                seen.add(href);
+                const text = (a.innerText || '').trim();
+                if (!text || text.length < 10) continue;
+                out.push({ url: href, text: text.slice(0, 1000) });
+            }
+            return out;
+        }""")
+
+        print(f"  \U0001f4cb Changelog entries found: {len(articles)}")
+
+        def _extract_date(text):
+            m = re.search(r'([A-Z][a-z]+ \d{1,2}, \d{4})', text or '')
+            if not m:
+                return None
+            try:
+                return datetime.strptime(m.group(1), "%B %d, %Y")
+            except ValueError:
+                return None
+
+        fresh = []
+        for art in articles:
+            d = _extract_date(art["text"])
+            if d and d >= cutoff_date and _norm_url(art["url"]) not in seen_urls:
+                fresh.append(art)
+
+        print(f"  \U0001f195 Fresh (unseen) entries: {len(fresh)}")
+
+        if not fresh:
+            return {
+                "service": "Sentry",
+                "url": "https://sentry.io/changelog/",
+                "content": "",
+                "scraped_at": datetime.now().isoformat(),
+                "status": "no_new_releases"
+            }
+
+        all_content = []
+        scraped_urls = []
+        for art in fresh[:15]:
+            all_content.append(f"{art['url']}\n{art['text'].strip()}")
+            scraped_urls.append(_norm_url(art["url"]))
+
+        return {
+            "service": "Sentry",
+            "url": "https://sentry.io/changelog/",
+            "content": "\n\n---\n\n".join(all_content),
+            "scraped_at": datetime.now().isoformat(),
+            "status": "ok",
+            "_new_urls": scraped_urls
+        }
+
+    except Exception as e:
+        print(f"  \u274c Sentry error: {e}")
+        return _error_result(
+            {"service": "Sentry", "url": "https://sentry.io/changelog/"},
+            str(e)
+        )
+
+
+# ---------------------------
 # SCRAPER
 # ---------------------------
 
@@ -420,6 +513,11 @@ async def main():
         apple_result = await scrape_apple(apple_page, cutoff_date, apple_seen_urls)
         await apple_page.close()
 
+        sentry_seen_urls = set(seen_hashes.get("Sentry_seen_urls", []))
+        sentry_page = await context.new_page()
+        sentry_result = await scrape_sentry(sentry_page, cutoff_date, sentry_seen_urls)
+        await sentry_page.close()
+
         semaphore = asyncio.Semaphore(2)
 
         async def scrape_with_limit(service):
@@ -433,7 +531,7 @@ async def main():
         playwright_results = await asyncio.gather(*[scrape_with_limit(s) for s in PAGES])
         await browser.close()
 
-    all_results = [revenuecat_result, apple_result] + list(playwright_results)
+    all_results = [revenuecat_result, apple_result, sentry_result] + list(playwright_results)
 
     for result in all_results:
         if result["status"] not in ("ok",):
@@ -460,6 +558,14 @@ async def main():
             seen_hashes["Apple_seen_urls"] = list(apple_seen_urls)
             new_results.append(result)
             print(f"🆕 New content: Apple Developer ({len(included)} articles)")
+            continue
+
+        if result["service"] == "Sentry":
+            included = result.pop("_new_urls", [])
+            sentry_seen_urls.update(included)
+            seen_hashes["Sentry_seen_urls"] = list(sentry_seen_urls)
+            new_results.append(result)
+            print(f"🆕 New content: Sentry ({len(included)} entries)")
             continue
 
         # Інші сервіси: суцільний блок, дедуп по хешу всього контенту
