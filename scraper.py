@@ -365,11 +365,12 @@ async def scrape_sentry(page, cutoff_date: datetime, seen_urls=None) -> dict:
 
 
 # ---------------------------
-# BYTEPLUS (DEBUG)
+# BYTEPLUS VOD
 # ---------------------------
 
-async def scrape_byteplus_debug(page) -> dict:
-    print(f"\U0001f50d BytePlus VOD (DEBUG)")
+async def scrape_byteplus(page, cutoff_date: datetime, seen_versions=None) -> dict:
+    seen_versions = seen_versions or set()
+    print(f"\U0001f50d BytePlus VOD")
     try:
         await page.goto(
             "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes",
@@ -379,60 +380,71 @@ async def scrape_byteplus_debug(page) -> dict:
         # сторінка JS-рендерна — даємо час дорендеритись
         await page.wait_for_timeout(7000)
 
-        info = await page.evaluate(r"""() => {
-            const res = {};
-            // 1) усі лінки: href + текст (перші 25)
-            const links = Array.from(document.querySelectorAll('a[href]'));
-            res.totalLinks = links.length;
-            res.sampleLinks = links.slice(0, 25).map(a => ({
-                href: (a.getAttribute('href') || '').slice(0, 80),
-                text: (a.innerText || '').trim().slice(0, 40)
-            }));
-            // 2) заголовки h1-h4 (перші 20) + чи є в них id
-            const heads = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
-            res.totalHeads = heads.length;
-            res.sampleHeads = heads.slice(0, 20).map(h => ({
-                tag: h.tagName,
-                id: h.id || (h.getAttribute('id') || ''),
-                text: (h.innerText || '').trim().slice(0, 60)
-            }));
-            // 3) будь-які елементи з id, що схожі на версію/якір (перші 20)
-            const ided = Array.from(document.querySelectorAll('[id]'));
-            res.sampleIds = ided.slice(0, 20).map(e => ({
-                tag: e.tagName,
-                id: (e.id || '').slice(0, 40),
-                text: (e.innerText || '').trim().slice(0, 40)
-            }));
-            // 4) рядки таблиці (release notes часто в таблиці): перші 10
-            const rows = Array.from(document.querySelectorAll('tr'));
-            res.totalRows = rows.length;
-            res.sampleRows = rows.slice(0, 10).map(r => (r.innerText || '').trim().replace(/\s+/g,' ').slice(0, 100));
-            return res;
+        # Таблиця: кожен <tr> = реліз. Колонки: Release date | Version | Description | ...
+        rows = await page.evaluate(r"""() => {
+            const out = [];
+            const trs = Array.from(document.querySelectorAll('tr'));
+            for (const tr of trs) {
+                const cells = Array.from(tr.querySelectorAll('td')).map(td => (td.innerText || '').trim());
+                if (cells.length < 3) continue;            // пропускаємо header / порожні
+                out.push({ date: cells[0], version: cells[1], desc: cells.slice(2).join(' | ').slice(0, 1500) });
+            }
+            return out;
         }""")
 
-        print(f"  \U0001f52c totalLinks={info.get('totalLinks')} totalHeads={info.get('totalHeads')} totalRows={info.get('totalRows')}")
-        print("  \U0001f52c --- sample LINKS ---")
-        for l in info.get('sampleLinks', []):
-            print(f"  \U0001f52c L: href={l['href']!r} text={l['text']!r}")
-        print("  \U0001f52c --- sample HEADS ---")
-        for h in info.get('sampleHeads', []):
-            print(f"  \U0001f52c H: <{h['tag']}> id={h['id']!r} text={h['text']!r}")
-        print("  \U0001f52c --- sample IDs ---")
-        for e in info.get('sampleIds', []):
-            print(f"  \U0001f52c I: <{e['tag']}> id={e['id']!r} text={e['text']!r}")
-        print("  \U0001f52c --- sample ROWS ---")
-        for r in info.get('sampleRows', []):
-            print(f"  \U0001f52c R: {r!r}")
+        print(f"  \U0001f4cb Table rows found: {len(rows)}")
+
+        def _parse_date(s):
+            s = (s or '').strip()
+            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except ValueError:
+                    continue
+            return None
+
+        # version виглядає як 1.10.0 / 1.9.0 — беремо рядки з валідною версією й датою >= cutoff
+        fresh = []
+        for r in rows:
+            ver = (r["version"] or "").strip()
+            if not re.match(r'^\d+\.\d+', ver):
+                continue
+            d = _parse_date(r["date"])
+            if d and d >= cutoff_date and ver not in seen_versions:
+                fresh.append(r)
+
+        print(f"  \U0001f195 Fresh (unseen) versions: {len(fresh)}")
+
+        if not fresh:
+            return {
+                "service": "BytePlus VOD",
+                "url": "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes",
+                "content": "",
+                "scraped_at": datetime.now().isoformat(),
+                "status": "no_new_releases"
+            }
+
+        base = "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes"
+        all_content = []
+        scraped_versions = []
+        for r in fresh[:15]:
+            ver = r["version"].strip()
+            # source_url з якорем-версією — стабільний унікальний ідентифікатор релізу
+            url = f"{base}#v{ver}"
+            all_content.append(f"{url}\nVersion {ver} ({r['date']})\n{r['desc'].strip()}")
+            scraped_versions.append(ver)
 
         return {
             "service": "BytePlus VOD",
-            "url": "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes",
-            "content": "",
+            "url": base,
+            "content": "\n\n---\n\n".join(all_content),
             "scraped_at": datetime.now().isoformat(),
-            "status": "no_new_releases"
+            "status": "ok",
+            "_new_versions": scraped_versions
         }
+
     except Exception as e:
-        print(f"  \u274c BytePlus debug error: {e}")
+        print(f"  \u274c BytePlus error: {e}")
         return _error_result(
             {"service": "BytePlus VOD", "url": "https://docs.byteplus.com/en/docs/byteplus-vod/docs-rn-player-release-notes"},
             str(e)
@@ -592,8 +604,9 @@ async def main():
         sentry_result = await scrape_sentry(sentry_page, cutoff_date, sentry_seen_urls)
         await sentry_page.close()
 
+        byteplus_seen_versions = set(seen_hashes.get("BytePlus_seen_versions", []))
         byteplus_page = await context.new_page()
-        byteplus_result = await scrape_byteplus_debug(byteplus_page)
+        byteplus_result = await scrape_byteplus(byteplus_page, cutoff_date, byteplus_seen_versions)
         await byteplus_page.close()
 
         semaphore = asyncio.Semaphore(2)
@@ -644,6 +657,14 @@ async def main():
             seen_hashes["Sentry_seen_urls"] = list(sentry_seen_urls)
             new_results.append(result)
             print(f"🆕 New content: Sentry ({len(included)} entries)")
+            continue
+
+        if result["service"] == "BytePlus VOD":
+            included = result.pop("_new_versions", [])
+            byteplus_seen_versions.update(included)
+            seen_hashes["BytePlus_seen_versions"] = list(byteplus_seen_versions)
+            new_results.append(result)
+            print(f"🆕 New content: BytePlus VOD ({len(included)} versions)")
             continue
 
         # Інші сервіси: суцільний блок, дедуп по хешу всього контенту
