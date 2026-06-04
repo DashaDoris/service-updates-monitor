@@ -200,59 +200,45 @@ async def scrape_apple(page, cutoff_date: datetime, seen_urls=None) -> dict:
 
         await page.wait_for_timeout(2000)
 
-        # ДІАГНОСТИКА: дивимось реальну структуру DOM навколо лінків /news/?id=
+        # Заголовки статей — це лінки /news/?id=, чий батьківський елемент <section>
+        # (внутрішні посилання в тексті лежать у <p>/<span> — їх відсікаємо).
+        # Apple News віддає статті у хронологічному порядку (свіжі зверху),
+        # тож беремо перші N заголовків + текст статті; дату/релевантність
+        # відсіє вже промпт (since_date) і дедуп по URL.
         articles = await page.evaluate("""() => {
             const out = [];
             const seen = new Set();
             const links = document.querySelectorAll("a[href*='/news/?id=']");
-            const debug = [];
             for (const a of links) {
                 const href = a.href.split('#')[0];
                 const title = (a.innerText || '').trim();
-                if (debug.length < 6) {
-                    debug.push({
-                        href: href.slice(-40),
-                        title: title.slice(0, 50),
-                        parentTag: a.parentElement ? a.parentElement.tagName : null,
-                        grandparentTag: (a.parentElement && a.parentElement.parentElement) ? a.parentElement.parentElement.tagName : null,
-                        closestHeading: a.closest('h1,h2,h3,h4') ? 'yes' : 'no'
-                    });
-                }
+                // лишаємо лише заголовки статей: лінк безпосередньо в <section>
+                if (!a.parentElement || a.parentElement.tagName !== 'SECTION') continue;
                 if (!title || title.length < 5) continue;
                 if (seen.has(href)) continue;
                 seen.add(href);
-                out.push({ url: href, title: title, body: '' });
+
+                // текст статті: проходимо сиблінги секції-заголовка до наступної статті
+                let body = '';
+                let node = a.parentElement.nextElementSibling;
+                let steps = 0;
+                while (node && steps < 15) {
+                    if (node.querySelector && node.querySelector("a[href*='/news/?id=']")) break;
+                    const t = (node.innerText || '').trim();
+                    if (t) body += t + '\n';
+                    node = node.nextElementSibling;
+                    steps++;
+                }
+                out.push({ url: href, title: title, body: body.slice(0, 1200) });
             }
-            return { out, debug, totalLinks: links.length };
+            return out;
         }""")
 
-        print(f"  🔬 DEBUG totalLinks={articles.get('totalLinks')}")
-        for d in articles.get('debug', []):
-            print(f"  🔬 {d}")
-        articles = articles.get('out', [])
+        print(f"  📋 Article headlines found: {len(articles)}")
 
-        print(f"  📋 Total articles found: {len(articles)}")
-
-        # Парсимо дату з body (перший рядок виду "Month D, YYYY") і фільтруємо по cutoff
-        def _extract_date(text):
-            m = re.search(r'([A-Z][a-z]+ \d{1,2}, \d{4})', text or '')
-            if not m:
-                return None
-            try:
-                return datetime.strptime(m.group(1), "%B %d, %Y")
-            except ValueError:
-                return None
-
-        fresh = []
-        for art in articles:
-            d = _extract_date(art["body"])
-            if d and d >= cutoff_date:
-                if _norm_url(art["url"]) not in seen_urls:
-                    fresh.append(art)
-
-        print(f"  📋 New articles after {cutoff_date.strftime('%B %d, %Y')}: "
-              f"{sum(1 for a in articles if (_extract_date(a['body']) or datetime.min) >= cutoff_date)}")
-        print(f"  🆕 Fresh (unseen) articles: {len(fresh)}")
+        # Беремо найсвіжіші N статей (зверху сторінки), відсіюємо вже бачені по URL.
+        fresh = [a for a in articles if _norm_url(a["url"]) not in seen_urls][:15]
+        print(f"  🆕 Fresh (unseen) headlines: {len(fresh)}")
 
         if not fresh:
             return {
@@ -265,7 +251,7 @@ async def scrape_apple(page, cutoff_date: datetime, seen_urls=None) -> dict:
 
         all_content = []
         scraped_urls = []
-        for art in fresh[:15]:
+        for art in fresh:
             all_content.append(f"{art['url']}\n{art['title']}\n{art['body'].strip()}")
             scraped_urls.append(_norm_url(art["url"]))
 
@@ -284,6 +270,7 @@ async def scrape_apple(page, cutoff_date: datetime, seen_urls=None) -> dict:
             {"service": "Apple Developer", "url": "https://developer.apple.com/news/"},
             str(e)
         )
+
 
 # ---------------------------
 # SCRAPER
