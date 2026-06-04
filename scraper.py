@@ -205,7 +205,7 @@ async def scrape_apple(page, cutoff_date: datetime, seen_urls=None) -> dict:
         # Apple News віддає статті у хронологічному порядку (свіжі зверху),
         # тож беремо перші N заголовків + текст статті; дату/релевантність
         # відсіє вже промпт (since_date) і дедуп по URL.
-        articles = await page.evaluate("""() => {
+        articles = await page.evaluate(r"""() => {
             const out = [];
             const seen = new Set();
             const links = document.querySelectorAll("a[href*='/news/?id=']");
