@@ -1,7 +1,8 @@
 name: Service Updates Scraper
 on:
   schedule:
-    - cron: '0 8 * * 1'  # 10:00 Kyiv winter / змін на '0 8 * * 1' для літа
+   - cron: '26 13 * * *'   # ТИМЧАСОВО для тесту — прибрати після перевірки
+    - cron: '0 8 * * 1'     # бойовий: щопонеділка 08:00 UTC
   workflow_dispatch:
 
 jobs:
