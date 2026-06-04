@@ -44,12 +44,20 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-async def get_existing_features() -> set:
-    """Читає існуючі feature_name з Coda таблиці"""
+def _norm_url(u) -> str:
+    """Нормалізує URL: прибирає query, hash, хвостовий слеш. Приймає рядок або urlref-dict."""
+    if isinstance(u, dict):
+        u = u.get("url") or u.get("name") or ""
+    s = (u or "").strip().lower().split("#")[0].split("?")[0]
+    return s[:-1] if s.endswith("/") else s
+
+
+async def get_existing_features():
+    """Читає Feature name + Source URL з Coda. Повертає (set назв, set норм. URL)."""
     coda_token = os.environ.get("CODA_API_TOKEN")
     if not coda_token:
         print("⚠️ No CODA_API_TOKEN — skipping Coda dedup")
-        return set()
+        return set(), set()
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -60,35 +68,28 @@ async def get_existing_features() -> set:
             )
             response.raise_for_status()
             rows = response.json().get("items", [])
-            existing = {
-                row["values"].get("Feature name", "").lower().strip()
-                for row in rows
-                if row.get("values", {}).get("Feature name")
-            }
-            print(f"📋 Existing features in Coda: {len(existing)}")
-            return existing
+            names, urls = set(), set()
+            for row in rows:
+                vals = row.get("values", {})
+                name = (vals.get("Feature name") or "").lower().strip()
+                url = _norm_url(vals.get("Source URL"))
+                if name:
+                    names.add(name)
+                if url:
+                    urls.add(url)
+            print(f"📋 Existing in Coda: {len(names)} names, {len(urls)} urls")
+            return names, urls
     except Exception as e:
         print(f"⚠️ Could not fetch Coda rows: {e}")
-        return set()
-
-
-def is_duplicate(feature_name: str, existing_features: set) -> bool:
-    name = feature_name.lower().strip()
-    for existing in existing_features:
-        if existing == name:
-            return True
-        # Fuzzy: одна назва містить іншу
-        if len(name) > 10 and len(existing) > 10:
-            if existing in name or name in existing:
-                return True
-    return False
+        return set(), set()
 
 
 # ---------------------------
 # REVENUECAT
 # ---------------------------
 
-async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
+async def scrape_revenuecat(page, cutoff_date: datetime, seen_urls=None) -> dict:
+    seen_urls = seen_urls or set()
     print(f"🔍 RevenueCat")
     try:
         await page.goto(
@@ -126,6 +127,10 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
 
         print(f"  📋 New releases after {cutoff_date.strftime('%B %d, %Y')}: {len(new_urls)}")
 
+        # Дедуп по URL ще до Gemini: викидаємо релізи, які вже бачили (кеш)
+        new_urls = [u for u in new_urls if _norm_url(u) not in seen_urls]
+        print(f"  🆕 Fresh (unseen) releases: {len(new_urls)}")
+
         if not new_urls:
             return {
                 "service": "RevenueCat",
@@ -136,6 +141,7 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
             }
 
         all_content = []
+        scraped_urls = []
         for url in new_urls[:10]:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -145,6 +151,7 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
                     return (main || document.body).innerText.slice(0, 1500);
                 }""")
                 all_content.append(f"{url}\n{text.strip()}")
+                scraped_urls.append(_norm_url(url))
                 await asyncio.sleep(1)
             except Exception as e:
                 print(f"  ⚠️ Failed to scrape {url}: {e}")
@@ -160,7 +167,8 @@ async def scrape_revenuecat(page, cutoff_date: datetime) -> dict:
             "url": "https://www.revenuecat.com/changelog",
             "content": "\n\n---\n\n".join(all_content),
             "scraped_at": datetime.now().isoformat(),
-            "status": "ok"
+            "status": "ok",
+            "_new_urls": scraped_urls
         }
 
     except Exception as e:
@@ -287,8 +295,11 @@ async def main():
     cutoff_date = datetime.now() - timedelta(days=40)
     cutoff_date_str = cutoff_date.strftime("%B %d, %Y")
 
-    # Читаємо існуючі фічі з Coda для дедуплікації
-    existing_features = await get_existing_features()
+    # Читаємо існуючі фічі з Coda для дедуплікації (назви + URL)
+    existing_names, existing_urls = await get_existing_features()
+
+    # Раніше побачені RevenueCat-релізи (персистяться в seen_hashes через кеш)
+    rc_seen_urls = set(seen_hashes.get("RevenueCat_seen_urls", []))
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -308,7 +319,7 @@ async def main():
         )
 
         revenuecat_page = await context.new_page()
-        revenuecat_result = await scrape_revenuecat(revenuecat_page, cutoff_date)
+        revenuecat_result = await scrape_revenuecat(revenuecat_page, cutoff_date, rc_seen_urls)
         await revenuecat_page.close()
 
         semaphore = asyncio.Semaphore(2)
@@ -331,13 +342,26 @@ async def main():
             print(f"⚠️  Skipped {result['service']}: {result['status']}")
             continue
 
+        result["since_date"] = cutoff_date_str
+        result["existing_features"] = list(existing_names)
+        result["existing_urls"] = list(existing_urls)
+
+        # RevenueCat: дедуп по URL вже зроблено в скрапері; завжди шлемо свіже,
+        # бо суцільний content-хеш тут не має сенсу (вікно сповзає щодня)
+        if result["service"] == "RevenueCat":
+            included = result.pop("_new_urls", [])
+            rc_seen_urls.update(included)
+            seen_hashes["RevenueCat_seen_urls"] = list(rc_seen_urls)
+            new_results.append(result)
+            print(f"🆕 New content: RevenueCat ({len(included)} releases)")
+            continue
+
+        # Інші сервіси: суцільний блок, дедуп по хешу всього контенту
         h = content_hash(result["content"])
         service_key = result["service"]
 
         if seen_hashes.get(service_key) != h:
             seen_hashes[service_key] = h
-            result["since_date"] = cutoff_date_str
-            result["existing_features"] = list(existing_features)
             new_results.append(result)
             print(f"🆕 New content: {result['service']}")
         else:
