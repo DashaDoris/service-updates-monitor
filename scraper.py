@@ -200,37 +200,36 @@ async def scrape_apple(page, cutoff_date: datetime, seen_urls=None) -> dict:
 
         await page.wait_for_timeout(2000)
 
-        # Збираємо пари {заголовок, url, дата} з заголовків-лінків статей.
-        # Дата лежить у тексті одразу після заголовка (напр. "June 3, 2026").
+        # ДІАГНОСТИКА: дивимось реальну структуру DOM навколо лінків /news/?id=
         articles = await page.evaluate("""() => {
             const out = [];
             const seen = new Set();
-            // заголовки статей — це <a href="/news/?id=..."> усередині <h2>/<h3>
             const links = document.querySelectorAll("a[href*='/news/?id=']");
+            const debug = [];
             for (const a of links) {
                 const href = a.href.split('#')[0];
                 const title = (a.innerText || '').trim();
-                // лишаємо тільки лінки, що є заголовками статей (мають текст і всередині heading)
-                const inHeading = a.closest('h1,h2,h3,h4');
-                if (!title || title.length < 5 || !inHeading) continue;
+                if (debug.length < 6) {
+                    debug.push({
+                        href: href.slice(-40),
+                        title: title.slice(0, 50),
+                        parentTag: a.parentElement ? a.parentElement.tagName : null,
+                        grandparentTag: (a.parentElement && a.parentElement.parentElement) ? a.parentElement.parentElement.tagName : null,
+                        closestHeading: a.closest('h1,h2,h3,h4') ? 'yes' : 'no'
+                    });
+                }
+                if (!title || title.length < 5) continue;
                 if (seen.has(href)) continue;
                 seen.add(href);
-                // текст статті: від заголовка до наступного заголовка
-                let body = '';
-                let node = inHeading.nextElementSibling;
-                let steps = 0;
-                while (node && steps < 12) {
-                    if (node.querySelector && node.querySelector("a[href*='/news/?id=']")) break;
-                    if (/^H[1-4]$/.test(node.tagName)) break;
-                    const t = (node.innerText || '').trim();
-                    if (t) body += t + '\\n';
-                    node = node.nextElementSibling;
-                    steps++;
-                }
-                out.push({ url: href, title: title, body: body.slice(0, 1200) });
+                out.push({ url: href, title: title, body: '' });
             }
-            return out;
+            return { out, debug, totalLinks: links.length };
         }""")
+
+        print(f"  🔬 DEBUG totalLinks={articles.get('totalLinks')}")
+        for d in articles.get('debug', []):
+            print(f"  🔬 {d}")
+        articles = articles.get('out', [])
 
         print(f"  📋 Total articles found: {len(articles)}")
 
